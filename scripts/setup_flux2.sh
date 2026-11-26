@@ -63,12 +63,14 @@ if [ ! -x "${SDCPP_BIN}" ]; then
     fi
     if [ -f "${SDCPP_BIN}" ]; then
       chmod +x "${SDCPP_BIN}"
-      if ldd "${SDCPP_BIN}" 2>/dev/null | grep -q "not found"; then
+      HELP_OUT="$("${SDCPP_BIN}" --help 2>&1 || true)"
+      LDD_OUT="$(ldd "${SDCPP_BIN}" 2>/dev/null || true)"
+      if grep -q "not found" <<<"${LDD_OUT}"; then
         echo "[flux2] Prebuilt sd-cli missing shared libs; falling back to source build..."
-        rm -f "${SDCPP_BIN}"
-      elif ! "${SDCPP_BIN}" --help 2>&1 | grep -q -- "--diffusion-model"; then
+        rm -rf "${SDCPP_DIR}"
+      elif ! grep -qF -- "--diffusion-model" <<<"${HELP_OUT}" || ! grep -qF -- "--llm" <<<"${HELP_OUT}"; then
         echo "[flux2] Prebuilt sd-cli health check failed; falling back to source build..."
-        rm -f "${SDCPP_BIN}"
+        rm -rf "${SDCPP_DIR}"
       else
         echo "[flux2] Prebuilt CUDA sd-cli verified at ${SDCPP_BIN}"
       fi
@@ -78,6 +80,7 @@ fi
 
 if [ ! -x "${SDCPP_BIN}" ]; then
   if [ ! -d "${SDCPP_DIR}/.git" ]; then
+    rm -rf "${SDCPP_DIR}"
     git clone --depth 1 --recursive https://github.com/leejet/stable-diffusion.cpp.git "${SDCPP_DIR}"
   fi
   cmake -S "${SDCPP_DIR}" -B "${SDCPP_DIR}/build" -G Ninja \
