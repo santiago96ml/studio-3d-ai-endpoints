@@ -56,10 +56,36 @@ class PartFieldInferenceModel:
 
     @classmethod
     def from_checkpoint(cls, ckpt_path: str, device: str = "cuda") -> "PartFieldInferenceModel":
+        import pickle
+        import types
         import torch
 
         inst = cls(device="cpu")
-        raw = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        try:
+            raw = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        except ModuleNotFoundError:
+            # Lightning ckpts may pickle yacs/omegaconf inside hyper_parameters metadata;
+            # stub missing non-tensor metadata modules cleanly while loading weights.
+            class _StubObj:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def __setstate__(self, state):
+                    pass
+
+            class _SafeUnpickler(pickle.Unpickler):
+                def find_class(self, module: str, name: str):
+                    try:
+                        return super().find_class(module, name)
+                    except ModuleNotFoundError:
+                        return _StubObj
+
+            safe_pickle = types.ModuleType("_safe_pickle")
+            safe_pickle.Unpickler = _SafeUnpickler
+            safe_pickle.load = lambda f, **kw: _SafeUnpickler(f).load()
+            safe_pickle.UnpicklingError = pickle.UnpicklingError
+            raw = torch.load(ckpt_path, map_location="cpu", weights_only=False, pickle_module=safe_pickle)
+
         sd = raw.get("state_dict", raw) if isinstance(raw, dict) else raw
         filtered = {
             k: v

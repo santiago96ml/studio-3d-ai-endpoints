@@ -8,3 +8,4 @@ einops>=0.8.0
 scipy>=1.13.0
 scikit-learn>=1.4.0
 trimesh>=4.5.0
+yacs>=0.1.8
