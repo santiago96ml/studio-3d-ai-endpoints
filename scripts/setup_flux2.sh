@@ -44,6 +44,39 @@ fi
 echo "[flux2] GPU compute arch=${GPU_ARCH}, VRAM=${VRAM_MB} MB, quant=${FLUX2_QUANT}"
 
 if [ ! -x "${SDCPP_BIN}" ]; then
+  if [ "${FLUX2_FORCE_SOURCE_BUILD:-0}" != "1" ] && [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "x86_64" ]; then
+    CUDA_MAJOR="$(nvcc --version 2>/dev/null | grep -oE 'release [0-9]+' | grep -oE '[0-9]+' | head -n1 || true)"
+    if [ -z "${CUDA_MAJOR}" ]; then
+      CUDA_MAJOR="$(nvidia-smi 2>/dev/null | grep -oE 'CUDA Version: [0-9]+' | grep -oE '[0-9]+' | head -n1 || echo 12)"
+    fi
+    if [ "${CUDA_MAJOR:-12}" -ge 13 ] 2>/dev/null; then
+      SDCLI_VARIANT="sd-cli-cu13"
+    else
+      SDCLI_VARIANT="sd-cli-cu12"
+    fi
+    mkdir -p "$(dirname "${SDCPP_BIN}")"
+    if [ -x "${RUNTIME_ROOT}/prebuilt/sd-cli" ]; then
+      cp -f "${RUNTIME_ROOT}/prebuilt/sd-cli" "${SDCPP_BIN}"
+    else
+      echo "[flux2] Fetching prebuilt CUDA binary (${SDCLI_VARIANT}) from decntai/sd-cli..."
+      curl -fsSL -L "https://huggingface.co/decntai/sd-cli/resolve/main/${SDCLI_VARIANT}" -o "${SDCPP_BIN}" || rm -f "${SDCPP_BIN}"
+    fi
+    if [ -f "${SDCPP_BIN}" ]; then
+      chmod +x "${SDCPP_BIN}"
+      if ldd "${SDCPP_BIN}" 2>/dev/null | grep -q "not found"; then
+        echo "[flux2] Prebuilt sd-cli missing shared libs; falling back to source build..."
+        rm -f "${SDCPP_BIN}"
+      elif ! "${SDCPP_BIN}" --help 2>&1 | grep -q -- "--diffusion-model"; then
+        echo "[flux2] Prebuilt sd-cli health check failed; falling back to source build..."
+        rm -f "${SDCPP_BIN}"
+      else
+        echo "[flux2] Prebuilt CUDA sd-cli verified at ${SDCPP_BIN}"
+      fi
+    fi
+  fi
+fi
+
+if [ ! -x "${SDCPP_BIN}" ]; then
   if [ ! -d "${SDCPP_DIR}/.git" ]; then
     git clone --depth 1 --recursive https://github.com/leejet/stable-diffusion.cpp.git "${SDCPP_DIR}"
   fi
