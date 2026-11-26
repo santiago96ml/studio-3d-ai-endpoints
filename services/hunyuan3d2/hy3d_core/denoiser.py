@@ -270,12 +270,13 @@ class Hunyuan3DDiT(nn.Module):
     def forward(self, x: Tensor, t: Tensor, contexts: dict, **kwargs) -> Tensor:
         cond = contexts["main"]
         latent = self.latent_in(x)
-        vec = self.time_in(timestep_embedding(t, 256, time_factor=self.time_factor).to(dtype=latent.dtype))
+        # Keep positional `self.time_factor` as 3rd arg (`max_period=1000`): matches upstream training/inference
+        vec = self.time_in(timestep_embedding(t, 256, self.time_factor).to(dtype=latent.dtype))
         if self.guidance_embed:
             guidance = kwargs.get("guidance")
             if guidance is None:
                 raise ValueError("Missing guidance strength for guidance-distilled Hunyuan3DDiT")
-            vec = vec + self.guidance_in(timestep_embedding(guidance, 256, time_factor=self.time_factor).to(dtype=latent.dtype))
+            vec = vec + self.guidance_in(timestep_embedding(guidance, 256, self.time_factor).to(dtype=latent.dtype))
 
         cond = self.cond_in(cond)
         for block in self.double_blocks:
