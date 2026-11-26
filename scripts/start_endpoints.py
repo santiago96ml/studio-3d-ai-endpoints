@@ -21,12 +21,12 @@ def _load_env_file(path: Path) -> dict[str, str]:
     env: dict[str, str] = {}
     if not path.is_file():
         return env
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        env[k.strip()] = v.strip().strip('"').strip("'")
+        env[k.lstrip("\ufeff").strip()] = v.strip().strip('"').strip("'")
     return env
 
 
@@ -52,11 +52,29 @@ def _find_cloudflared(runtime_root: Path) -> str:
     raise FileNotFoundError("cloudflared not found; run scripts/setup_gateway.sh first")
 
 
-def _spawn_uvicorn(python_bin: Path, module_app: str, port: int, extra_env: dict[str, str], log_path: Path) -> subprocess.Popen:
+def _venv_python(env_root: Path, name: str) -> Path:
+    win_py = env_root / name / "Scripts" / "python.exe"
+    if win_py.is_file():
+        return win_py
+    nix_py = env_root / name / "bin" / "python"
+    if nix_py.is_file():
+        return nix_py
+    return sys.executable if os.name == "nt" else nix_py
+
+
+def _spawn_uvicorn(
+    python_bin: Path,
+    module_app: str,
+    port: int,
+    extra_env: dict[str, str],
+    log_path: Path,
+    open_logs: list,
+) -> subprocess.Popen:
     env = os.environ.copy()
     env.update(extra_env)
     env["PYTHONPATH"] = str(REPO_ROOT)
     log_f = open(log_path, "w", encoding="utf-8")
+    open_logs.append(log_f)
     return subprocess.Popen(
         [
             str(python_bin),
@@ -82,6 +100,9 @@ def main() -> int:
     parser.add_argument("--mode", choices=["all", "flux2", "trellis2"], default="all")
     parser.add_argument("--env-root", default=os.environ.get("ENV_ROOT", "/content/envs"))
     parser.add_argument("--runtime-root", default=os.environ.get("RUNTIME_ROOT", "/content/runtime"))
+    parser.add_argument("--gateway-port", type=int, default=8000)
+    parser.add_argument("--flux2-port", type=int, default=8001)
+    parser.add_argument("--trellis2-port", type=int, default=8002)
     parser.add_argument("--no-tunnel", action="store_true")
     args = parser.parse_args()
 
@@ -89,6 +110,7 @@ def main() -> int:
     runtime_root = Path(args.runtime_root)
     runtime_root.mkdir(parents=True, exist_ok=True)
     procs: list[subprocess.Popen] = []
+    open_logs: list = []
 
     def cleanup(*_args):
         for p in procs:
@@ -99,6 +121,11 @@ def main() -> int:
                 p.wait(timeout=5)
             except Exception:
                 p.kill()
+        for f in open_logs:
+            try:
+                f.close()
+            except Exception:
+                pass
 
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
@@ -106,30 +133,30 @@ def main() -> int:
     try:
         if args.mode in ("all", "flux2"):
             f_env = _load_env_file(runtime_root / "flux2.env")
-            f_py = env_root / "flux2" / "bin" / "python"
-            print(f"[start] Launching FLUX.2-klein-4B service on :8001 ({f_py})...")
-            procs.append(_spawn_uvicorn(f_py, "services.flux2_klein.app:app", 8001, f_env, runtime_root / "flux2.log"))
-            if not _wait_http_ok("http://127.0.0.1:8001/health"):
+            f_py = _venv_python(env_root, "flux2")
+            print(f"[start] Launching FLUX.2-klein-4B service on :{args.flux2_port} ({f_py})...")
+            procs.append(_spawn_uvicorn(f_py, "services.flux2_klein.app:app", args.flux2_port, f_env, runtime_root / "flux2.log", open_logs))
+            if not _wait_http_ok(f"http://127.0.0.1:{args.flux2_port}/health"):
                 print("[warn] FLUX.2 health check did not respond within 45s; inspect", runtime_root / "flux2.log")
 
         if args.mode in ("all", "trellis2"):
             t_env = _load_env_file(runtime_root / "trellis2.env")
-            t_py = env_root / "trellis2" / "bin" / "python"
-            print(f"[start] Launching TRELLIS.2-4B service on :8002 ({t_py})...")
-            procs.append(_spawn_uvicorn(t_py, "services.trellis2.app:app", 8002, t_env, runtime_root / "trellis2.log"))
-            if not _wait_http_ok("http://127.0.0.1:8002/health"):
+            t_py = _venv_python(env_root, "trellis2")
+            print(f"[start] Launching TRELLIS.2-4B service on :{args.trellis2_port} ({t_py})...")
+            procs.append(_spawn_uvicorn(t_py, "services.trellis2.app:app", args.trellis2_port, t_env, runtime_root / "trellis2.log", open_logs))
+            if not _wait_http_ok(f"http://127.0.0.1:{args.trellis2_port}/health"):
                 print("[warn] TRELLIS.2 health check did not respond within 45s; inspect", runtime_root / "trellis2.log")
 
-        expose_port = 8001 if args.mode == "flux2" else (8002 if args.mode == "trellis2" else 8000)
+        expose_port = args.flux2_port if args.mode == "flux2" else (args.trellis2_port if args.mode == "trellis2" else args.gateway_port)
         if args.mode == "all":
-            g_py = env_root / "gateway" / "bin" / "python"
+            g_py = _venv_python(env_root, "gateway")
             g_env = {
-                "FLUX2_URL": "http://127.0.0.1:8001",
-                "TRELLIS2_URL": "http://127.0.0.1:8002",
+                "FLUX2_URL": f"http://127.0.0.1:{args.flux2_port}",
+                "TRELLIS2_URL": f"http://127.0.0.1:{args.trellis2_port}",
             }
-            print(f"[start] Launching GPU-Lease Gateway on :8000 ({g_py})...")
-            procs.append(_spawn_uvicorn(g_py, "gateway.app:app", 8000, g_env, runtime_root / "gateway.log"))
-            if not _wait_http_ok("http://127.0.0.1:8000/health"):
+            print(f"[start] Launching GPU-Lease Gateway on :{args.gateway_port} ({g_py})...")
+            procs.append(_spawn_uvicorn(g_py, "gateway.app:app", args.gateway_port, g_env, runtime_root / "gateway.log", open_logs))
+            if not _wait_http_ok(f"http://127.0.0.1:{args.gateway_port}/health"):
                 print("[warn] Gateway health check did not respond; inspect", runtime_root / "gateway.log")
 
         if args.no_tunnel:

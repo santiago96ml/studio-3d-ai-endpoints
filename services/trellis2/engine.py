@@ -67,7 +67,6 @@ def build_trellis_command(
 
     resolved_res = 1024 if int(res) >= 1024 else 512
     resolved_steps = max(4, min(30, int(steps)))
-    resolved_faces = max(5000, min(500000, int(faces)))
     bg = bg_removal.strip().lower() if bg_removal.strip().lower() in VALID_BG_MODES else "auto"
 
     if len(input_paths) == 1:
@@ -87,13 +86,12 @@ def build_trellis_command(
         str(resolved_res),
         "--steps",
         str(resolved_steps),
-        "--faces",
-        str(resolved_faces),
         "--seed",
         str(int(seed)),
-        "--bg-removal",
-        bg,
     ])
+    # trellis-cli only accepts explicit 'threshold' or 'birefnet'; omit for native 'auto'.
+    if bg in ("threshold", "birefnet"):
+        cmd.extend(["--bg-removal", bg])
     if no_texture:
         cmd.append("--no-texture")
     if cfg.require_gpu:
@@ -184,7 +182,11 @@ class Trellis2Engine:
 
             bin_dir = str(Path(self.cfg.bin_path).parent)
             prev_ld = os.environ.get("LD_LIBRARY_PATH", "")
-            env = {"LD_LIBRARY_PATH": f"{bin_dir}:{prev_ld}" if prev_ld else bin_dir}
+            prev_path = os.environ.get("PATH", "")
+            env = {
+                "LD_LIBRARY_PATH": f"{bin_dir}:{prev_ld}" if prev_ld else bin_dir,
+                "PATH": f"{bin_dir}{os.pathsep}{prev_path}" if prev_path else bin_dir,
+            }
 
             rc, stdout, stderr, elapsed = run_subprocess_checked(cmd, env=env, timeout_sec=self.cfg.timeout_sec)
             if rc != 0:

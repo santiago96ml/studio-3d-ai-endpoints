@@ -167,6 +167,8 @@ class Flux2Engine:
             bin_dir = str(Path(self.cfg.bin_path).parent)
             prev_ld = os.environ.get("LD_LIBRARY_PATH", "")
             env["LD_LIBRARY_PATH"] = f"{bin_dir}:{prev_ld}" if prev_ld else bin_dir
+            prev_path = os.environ.get("PATH", "")
+            env["PATH"] = f"{bin_dir}{os.pathsep}{prev_path}" if prev_path else bin_dir
 
             rc, stdout, stderr, elapsed = run_subprocess_checked(cmd, env=env, timeout_sec=self.cfg.timeout_sec)
             if rc != 0:

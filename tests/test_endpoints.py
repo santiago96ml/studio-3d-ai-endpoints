@@ -79,6 +79,8 @@ def test_build_trellis_command_single_and_multiview(tmp_path):
     assert single[:3] == ["/opt/trellis-cli", str(tmp_path / "front.png"), str(tmp_path / "out.glb")]
     assert "--no-texture" in single
     assert "--require-gpu" in single
+    assert "--faces" not in single
+    assert "--bg-removal" not in single  # 'auto' omits --bg-removal in trellis-cli v0.8.1
 
     mv = build_trellis_command(
         cfg,
@@ -86,11 +88,13 @@ def test_build_trellis_command_single_and_multiview(tmp_path):
         out_glb=tmp_path / "mv.glb",
         res=1024,
         no_texture=False,
+        bg_removal="threshold",
         view_angles=[0, 180],
     )
     assert "--view" in mv
     assert f"{tmp_path / 'f.png'}:0" in mv
     assert f"{tmp_path / 'b.png'}:180" in mv
+    assert "--bg-removal" in mv and "threshold" in mv
     assert "--no-texture" not in mv
 
 
