@@ -76,12 +76,12 @@ class ImageEncoder(nn.Module):
             std=self.std,
             value_range=value_range,
         )
-        # Note: Dinov2 handles arbitrary image_size if interpolate_pos_encoding=True for resolutions != config.image_size
-        outputs = (
-            self.model(inputs, interpolate_pos_encoding=True)
-            if isinstance(self.model, Dinov2Model)
-            else self.model(inputs)
+        need_interp = (
+            isinstance(self.model, Dinov2Model)
+            and hasattr(self.model.config, "image_size")
+            and int(inputs.shape[-1]) != int(self.model.config.image_size)
         )
+        outputs = self.model(inputs, interpolate_pos_encoding=True) if need_interp else self.model(inputs)
         last_hidden_state = outputs.last_hidden_state
         if not self.use_cls_token:
             last_hidden_state = last_hidden_state[:, 1:, :]
