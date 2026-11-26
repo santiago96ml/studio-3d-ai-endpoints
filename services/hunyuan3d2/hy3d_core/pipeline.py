@@ -71,6 +71,35 @@ def _strip_prefix_state(state: dict[str, torch.Tensor], prefix: str) -> dict[str
     return {k[plen:]: v for k, v in state.items() if k.startswith(prefix)}
 
 
+def _adapt_conditioner_state_dict(
+    cond_sd: dict[str, torch.Tensor], conditioner: torch.nn.Module
+) -> dict[str, torch.Tensor]:
+    """Support both transformers v4 and v5 Dinov2 naming (q_proj/gate_proj/up_proj)."""
+    expected_keys = set(conditioner.state_dict().keys())
+    if all(k in expected_keys for k in cond_sd.keys()):
+        return cond_sd
+
+    adapted: dict[str, torch.Tensor] = {}
+    for k, v in cond_sd.items():
+        new_k = (
+            k.replace(".attention.attention.query.", ".attention.q_proj.")
+            .replace(".attention.attention.key.", ".attention.k_proj.")
+            .replace(".attention.attention.value.", ".attention.v_proj.")
+            .replace(".attention.output.dense.", ".attention.o_proj.")
+            .replace(".mlp.weights_out.", ".mlp.down_proj.")
+        )
+        if ".mlp.weights_in." in new_k:
+            gate_k = new_k.replace(".mlp.weights_in.", ".mlp.gate_proj.")
+            up_k = new_k.replace(".mlp.weights_in.", ".mlp.up_proj.")
+            if gate_k in expected_keys and up_k in expected_keys:
+                g_v, u_v = torch.chunk(v, 2, dim=0)
+                adapted[gate_k] = g_v.contiguous()
+                adapted[up_k] = u_v.contiguous()
+                continue
+        adapted[new_k] = v
+    return adapted
+
+
 class DistilledHunyuan3DPipeline:
     """Memory-distilled FlashVDM Flow-Matching 3D pipeline (shape only)."""
 
@@ -157,6 +186,7 @@ class DistilledHunyuan3DPipeline:
             conditioner = instantiate_from_config(dit_cfg["conditioner"])
 
         model.load_state_dict(model_sd, strict=True, assign=True)
+        cond_sd = _adapt_conditioner_state_dict(cond_sd, conditioner)
         conditioner.load_state_dict(cond_sd, strict=True, assign=True)
         del model_sd, cond_sd
 
