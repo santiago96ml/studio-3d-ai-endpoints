@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 def array_to_tensor(np_array: np.ndarray) -> "torch.Tensor":
     import torch
 
-    image_pt = torch.from_numpy(np_array).float()
+    image_pt = torch.from_numpy(np.ascontiguousarray(np_array, dtype=np.float32))
     image_pt = image_pt / 255.0 * 2.0 - 1.0
     return image_pt.permute(2, 0, 1).unsqueeze(0)
 
