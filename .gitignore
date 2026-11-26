@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+models/
+bin/
+runtime/
+build/
+*.gguf
+*.safetensors
+*.ckpt
+*.bin
+*.glb
+*.png
+*.log
+.env
+.pytest_cache/

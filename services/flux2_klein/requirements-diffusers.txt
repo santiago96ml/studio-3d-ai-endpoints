@@ -1,0 +1,8 @@
+# Optional PyTorch Diffusers backend (only needed if FLUX2_BACKEND=diffusers instead of default sdcpp CUDA/GGML)
+torch>=2.4.0
+git+https://github.com/huggingface/diffusers.git
+transformers>=4.48.0
+accelerate>=1.0.0
+gguf>=0.10.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
