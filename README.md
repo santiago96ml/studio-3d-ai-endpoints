@@ -8,6 +8,7 @@ Arquitectura **headless, sin UI pesada ni runtimes genéricos**, diseñada para 
 |---|---|---|---|---|
 | `flux2_klein` | `black-forest-labs/FLUX.2-klein-4B` (`Q4_K_M` + `Qwen3-4B`) | `stable-diffusion.cpp` (`sd-cli` CUDA) | `8001` | ~5.5–7 GB (se libera al terminar) |
 | `hunyuan3d2` | `tencent/Hunyuan3D-2` (`v2-0-turbo` / `v2-mini-turbo` fp16) | **Núcleo geométrico destilado `hy3d_core`** (FlashVDM 5 steps + MC + manifold3d) | `8003` | ~3.2 GB (`stage_offload`) / ~5.1 GB (`resident`) |
+| `partfield` | `nv-tlabs/PartField` (`model_objaverse.ckpt` 1.24 GB) | **Núcleo destilado `pf_core`** (PVCNN + Triplane puro PyTorch + Ward MST clustering) | `8004` | ~1.5–2.5 GB (FP16 autocast) |
 | `trellis2` | `microsoft/TRELLIS.2-4B` (`ilintar/trellis2-gguf` `q4`/`q8`) | `pwilkin/trellis.cpp` (`trellis-cli` CUDA) | `8002` | ~7–10 GB |
 | `gateway` | Coordinador HTTP con `asyncio.Lock` (GPU Lease serializado) | FastAPI + `httpx` + `cloudflared` | `8000` | Mínimo (<150 MB RAM) |
 
@@ -22,12 +23,19 @@ Arquitectura **headless, sin UI pesada ni runtimes genéricos**, diseñada para 
   - Modo `stage_offload` automático para GPUs <=16 GB (ej. T4) o `resident` para L4/A100.
 - **Eliminado explícitamente:** `gradio_app.py`, `blender_addon.py`, `HunyuanDiT` text2image, `hy3dgen/texgen` (`delight` + `paint` + `custom_rasterizer`/`mesh_processor`), `diso`, `pymeshlab`, `torch_cluster`, `torchvision`, `opencv-python`, `docs/` y `assets/`.
 
+### Qué se extrajo y qué se podó de `nv-tlabs/PartField` (`services/partfield/pf_core/`)
+
+- **Conservado y destilado:** `TriPlanePC2Encoder` (PVCNN + `UNetTriplane3dAware`) + `TriplaneTransformer` + clustering aglomerativo con adyacencia MST (`scipy.sparse.csgraph`) y contracción espacial de superparches para responder en `<2s` incluso con 100k+ caras.
+- **Cero dependencias CUDA/C++ pesadas:** reemplazamos `torch_scatter.scatter_mean` por `scatter_add_` nativo de PyTorch y `networkx` por `scipy.sparse.csgraph.minimum_spanning_tree`.
+- **Eliminado explícitamente:** `lightning`, `boto3`, `h5py`, `mesh2sdf`, `tetgen`, `vtk`, `pymeshlab`, `libigl`, `polyscope`, `open3d`, entrenamiento y `ResidualUNet3D`/`sdf_decoder`.
+
 ## Endpoints HTTP
 
 - `GET /health` → Estado de servicios, pesos cargados y telemetría `nvidia-smi`.
 - `POST /v1/concept` (`multipart/form-data`: `prompt`, `ref_image`, `width=768`, `height=768`, `steps=4`, `cfg_scale=1.0`, `seed=42`) → Devuelve `image/png`.
 - `POST /v1/image-to-3d` (`multipart/form-data`: `image`, `extra_views`, `res=512`, `steps=12`, `faces=150000`, `no_texture=true`) → Devuelve `.glb` (`model/gltf-binary`).
-- `POST /v1/sketch-to-3d` (`multipart/form-data`: `image`, `prompt`) → Encadena `FLUX.2-klein-4B` → `TRELLIS.2-4B` bajo un único lock de GPU y devuelve `concept_png_b64` + `glb_b64` (o `.glb` directo con `response_format=glb`).
+- `POST /v1/segment-parts` (`multipart/form-data`: `mesh`, `num_parts=10`) → Devuelve `face_labels` + `centers_norm` semánticos sobre la malla fija sin alterar geometría.
+- `POST /v1/sketch-to-3d` (`multipart/form-data`: `image`, `prompt`) → Encadena `FLUX.2-klein-4B` → `Hunyuan3D-2 / TRELLIS.2` bajo un único lock de GPU y devuelve `concept_png_b64` + `glb_b64` (o `.glb` directo con `response_format=glb`).
 
 ## Uso rápido en Google Colab
 

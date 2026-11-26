@@ -26,6 +26,7 @@ gpu_lease_lock = asyncio.Lock()
 FLUX2_URL = os.environ.get("FLUX2_URL", "http://127.0.0.1:8001").rstrip("/")
 TRELLIS2_URL = os.environ.get("TRELLIS2_URL", "http://127.0.0.1:8002").rstrip("/")
 HUNYUAN3D_URL = os.environ.get("HUNYUAN3D_URL", "http://127.0.0.1:8003").rstrip("/")
+PARTFIELD_URL = os.environ.get("PARTFIELD_URL", "http://127.0.0.1:8004").rstrip("/")
 DEFAULT_3D_ENGINE = os.environ.get("STUDIO_3D_ENGINE", "auto").strip().lower()
 
 
@@ -47,13 +48,14 @@ async def _probe_service(client: httpx.AsyncClient, url: str) -> dict:
 @app.get("/health")
 async def health():
     async with httpx.AsyncClient() as client:
-        flux_h, trellis_h, hunyuan_h = await asyncio.gather(
+        flux_h, trellis_h, hunyuan_h, partfield_h = await asyncio.gather(
             _probe_service(client, FLUX2_URL),
             _probe_service(client, TRELLIS2_URL),
             _probe_service(client, HUNYUAN3D_URL),
+            _probe_service(client, PARTFIELD_URL),
         )
     return {
-        "ok": bool(flux_h.get("ok") or trellis_h.get("ok") or hunyuan_h.get("ok")),
+        "ok": bool(flux_h.get("ok") or trellis_h.get("ok") or hunyuan_h.get("ok") or partfield_h.get("ok")),
         "service": "studio-3d-gateway",
         "default_3d_engine": DEFAULT_3D_ENGINE,
         "gpu": detect_gpu_info(),
@@ -61,6 +63,7 @@ async def health():
             "flux2_klein": flux_h,
             "hunyuan3d2": hunyuan_h,
             "trellis2": trellis_h,
+            "partfield": partfield_h,
         },
     }
 
@@ -89,10 +92,51 @@ async def _select_3d_backend(client: httpx.AsyncClient, requested: str) -> tuple
 
 async def _maybe_unload_other_3d(client: httpx.AsyncClient, target_engine: str) -> None:
     if target_engine == "trellis2":
+        for u in (HUNYUAN3D_URL, PARTFIELD_URL):
+            try:
+                await client.post(f"{u}/v1/unload", headers=_forward_headers(), timeout=5.0)
+            except Exception:
+                pass
+    elif target_engine == "hunyuan3d2":
         try:
-            await client.post(f"{HUNYUAN3D_URL}/v1/unload", headers=_forward_headers(), timeout=5.0)
+            await client.post(f"{PARTFIELD_URL}/v1/unload", headers=_forward_headers(), timeout=5.0)
         except Exception:
             pass
+    elif target_engine == "partfield":
+        # Libera Hunyuan3D si VRAM total < 18 GB (Colab T4 15 GB); en L4 (23 GB) coexisten en paralelo
+        gpu = detect_gpu_info()
+        vram_mb = int((gpu or {}).get("vram_total_mb") or 0)
+        if 0 < vram_mb < 18000:
+            try:
+                await client.post(f"{HUNYUAN3D_URL}/v1/unload", headers=_forward_headers(), timeout=5.0)
+            except Exception:
+                pass
+
+
+@app.post("/v1/segment-parts")
+async def segment_parts_endpoint(
+    request: Request,
+    mesh: UploadFile = File(...),
+    num_parts: int = Form(default=10),
+):
+    """Segmenta un .GLB fijo en partes semánticas limpias vía PartField destilado (:8004)."""
+    verify_api_token(request.headers)
+    raw_glb = await mesh.read()
+    if not raw_glb:
+        raise HTTPException(status_code=400, detail="mesh file is required")
+
+    async with gpu_lease_lock:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            await _maybe_unload_other_3d(client, "partfield")
+            resp = await client.post(
+                f"{PARTFIELD_URL}/v1/segment-parts",
+                data={"num_parts": str(num_parts)},
+                files=[("mesh", (mesh.filename or "model.glb", raw_glb, mesh.content_type or "model/gltf-binary"))],
+                headers=_forward_headers(),
+            )
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text[:500])
+    return resp.json()
 
 
 @app.post("/v1/concept")

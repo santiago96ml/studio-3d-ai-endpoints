@@ -99,8 +99,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Start isolated per-model GPU endpoints")
     parser.add_argument(
         "--mode",
-        choices=["all", "flux2", "trellis2", "hunyuan3d2", "flux2_hunyuan3d2", "flux2_trellis2"],
-        default="flux2_hunyuan3d2",
+        choices=[
+            "all",
+            "flux2",
+            "trellis2",
+            "hunyuan3d2",
+            "partfield",
+            "flux2_hunyuan3d2",
+            "flux2_hunyuan3d2_partfield",
+            "flux2_trellis2",
+        ],
+        default="flux2_hunyuan3d2_partfield",
     )
     parser.add_argument("--env-root", default=os.environ.get("ENV_ROOT", "/content/envs"))
     parser.add_argument("--runtime-root", default=os.environ.get("RUNTIME_ROOT", "/content/runtime"))
@@ -108,6 +117,7 @@ def main() -> int:
     parser.add_argument("--flux2-port", type=int, default=8001)
     parser.add_argument("--trellis2-port", type=int, default=8002)
     parser.add_argument("--hunyuan3d2-port", type=int, default=8003)
+    parser.add_argument("--partfield-port", type=int, default=8004)
     parser.add_argument("--no-tunnel", action="store_true")
     args = parser.parse_args()
 
@@ -135,10 +145,11 @@ def main() -> int:
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
-    use_flux2 = args.mode in ("all", "flux2", "flux2_hunyuan3d2", "flux2_trellis2")
-    use_hunyuan = args.mode in ("all", "hunyuan3d2", "flux2_hunyuan3d2")
+    use_flux2 = args.mode in ("all", "flux2", "flux2_hunyuan3d2", "flux2_hunyuan3d2_partfield", "flux2_trellis2")
+    use_hunyuan = args.mode in ("all", "hunyuan3d2", "flux2_hunyuan3d2", "flux2_hunyuan3d2_partfield")
     use_trellis = args.mode in ("all", "trellis2", "flux2_trellis2")
-    use_gateway = args.mode in ("all", "flux2_hunyuan3d2", "flux2_trellis2")
+    use_partfield = args.mode in ("all", "partfield", "flux2_hunyuan3d2_partfield")
+    use_gateway = args.mode in ("all", "flux2_hunyuan3d2", "flux2_hunyuan3d2_partfield", "flux2_trellis2")
 
     try:
         if use_flux2:
@@ -165,6 +176,14 @@ def main() -> int:
             if not _wait_http_ok(f"http://127.0.0.1:{args.trellis2_port}/health"):
                 print("[warn] TRELLIS.2 health check did not respond within 45s; inspect", runtime_root / "trellis2.log", flush=True)
 
+        if use_partfield:
+            pf_env = _load_env_file(runtime_root / "partfield.env")
+            pf_py = _venv_python(env_root, "partfield")
+            print(f"[start] Launching Distilled PartField service on :{args.partfield_port} ({pf_py})...", flush=True)
+            procs.append(_spawn_uvicorn(pf_py, "services.partfield.app:app", args.partfield_port, pf_env, runtime_root / "partfield.log", open_logs))
+            if not _wait_http_ok(f"http://127.0.0.1:{args.partfield_port}/health"):
+                print("[warn] PartField health check did not respond within 45s; inspect", runtime_root / "partfield.log", flush=True)
+
         if use_gateway:
             expose_port = args.gateway_port
             default_3d = "trellis2" if args.mode == "flux2_trellis2" else "hunyuan3d2"
@@ -173,6 +192,7 @@ def main() -> int:
                 "FLUX2_URL": f"http://127.0.0.1:{args.flux2_port}",
                 "TRELLIS2_URL": f"http://127.0.0.1:{args.trellis2_port}",
                 "HUNYUAN3D_URL": f"http://127.0.0.1:{args.hunyuan3d2_port}",
+                "PARTFIELD_URL": f"http://127.0.0.1:{args.partfield_port}",
                 "STUDIO_3D_ENGINE": default_3d,
             }
             print(f"[start] Launching GPU-Lease Gateway on :{args.gateway_port} ({g_py}, default_3d={default_3d})...", flush=True)
@@ -183,6 +203,8 @@ def main() -> int:
             expose_port = args.flux2_port
         elif use_hunyuan:
             expose_port = args.hunyuan3d2_port
+        elif use_partfield:
+            expose_port = args.partfield_port
         else:
             expose_port = args.trellis2_port
 
@@ -220,6 +242,8 @@ def main() -> int:
                     print(f"  - POST {public_url}/v1/concept", flush=True)
                 if use_hunyuan or use_trellis:
                     print(f"  - POST {public_url}/v1/image-to-3d", flush=True)
+                if use_partfield:
+                    print(f"  - POST {public_url}/v1/segment-parts", flush=True)
                 if use_gateway:
                     print(f"  - POST {public_url}/v1/sketch-to-3d", flush=True)
                 print("=" * 68 + "\n", flush=True)

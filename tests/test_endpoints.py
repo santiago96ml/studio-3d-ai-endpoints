@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 import gateway.app as gw_mod
 import services.flux2_klein.app as flux_app_mod
 import services.hunyuan3d2.app as hunyuan_app_mod
+import services.partfield.app as partfield_app_mod
 import services.trellis2.app as trellis_app_mod
 from services.flux2_klein.engine import Flux2Config, build_sdcpp_command
 from services.trellis2.engine import Trellis2Config, build_trellis_command
@@ -214,6 +215,7 @@ def test_gateway_health_and_sketch_to_3d(monkeypatch):
     flux_transport = httpx.ASGITransport(app=flux_app_mod.app)
     hunyuan_transport = httpx.ASGITransport(app=hunyuan_app_mod.app)
     trellis_transport = httpx.ASGITransport(app=trellis_app_mod.app)
+    partfield_transport = httpx.ASGITransport(app=partfield_app_mod.app)
 
     orig_async_client = httpx.AsyncClient
 
@@ -222,23 +224,28 @@ def test_gateway_health_and_sketch_to_3d(monkeypatch):
             self._fc = orig_async_client(transport=flux_transport, base_url="http://flux2")
             self._hc = orig_async_client(transport=hunyuan_transport, base_url="http://hunyuan3d2")
             self._tc = orig_async_client(transport=trellis_transport, base_url="http://trellis2")
+            self._pc = orig_async_client(transport=partfield_transport, base_url="http://partfield")
 
         async def __aenter__(self):
             await self._fc.__aenter__()
             await self._hc.__aenter__()
             await self._tc.__aenter__()
+            await self._pc.__aenter__()
             return self
 
         async def __aexit__(self, *exc):
             await self._fc.__aexit__(*exc)
             await self._hc.__aexit__(*exc)
             await self._tc.__aexit__(*exc)
+            await self._pc.__aexit__(*exc)
 
         async def get(self, url, **kw):
             if url.startswith(gw_mod.FLUX2_URL):
                 return await self._fc.get(url.replace(gw_mod.FLUX2_URL, ""), **kw)
             if url.startswith(gw_mod.HUNYUAN3D_URL):
                 return await self._hc.get(url.replace(gw_mod.HUNYUAN3D_URL, ""), **kw)
+            if url.startswith(gw_mod.PARTFIELD_URL):
+                return await self._pc.get(url.replace(gw_mod.PARTFIELD_URL, ""), **kw)
             return await self._tc.get(url.replace(gw_mod.TRELLIS2_URL, ""), **kw)
 
         async def post(self, url, **kw):
@@ -246,6 +253,8 @@ def test_gateway_health_and_sketch_to_3d(monkeypatch):
                 return await self._fc.post(url.replace(gw_mod.FLUX2_URL, ""), **kw)
             if url.startswith(gw_mod.HUNYUAN3D_URL):
                 return await self._hc.post(url.replace(gw_mod.HUNYUAN3D_URL, ""), **kw)
+            if url.startswith(gw_mod.PARTFIELD_URL):
+                return await self._pc.post(url.replace(gw_mod.PARTFIELD_URL, ""), **kw)
             return await self._tc.post(url.replace(gw_mod.TRELLIS2_URL, ""), **kw)
 
     monkeypatch.setattr(gw_mod.httpx, "AsyncClient", _RouterClient)
@@ -363,3 +372,92 @@ def test_scripts_lf_and_notebook_valid():
     assert nb["nbformat"] == 4
     joined = "\n".join("".join(c.get("source", [])) for c in nb["cells"])
     assert "santiago96ml/studio-3d-ai-endpoints" in joined
+    assert "setup_partfield.sh" in joined
+
+
+def test_partfield_distilled_no_bloat_and_gateway_contract(monkeypatch):
+    import ast
+    import numpy as np
+
+    pf_dir = REPO_ROOT / "services" / "partfield" / "pf_core"
+    banned = {"lightning", "pytorch_lightning", "boto3", "h5py", "mesh2sdf", "tetgen", "vtk", "pymeshlab", "libigl", "polyscope", "open3d", "torch_scatter", "networkx"}
+    for py_path in pf_dir.glob("*.py"):
+        tree = ast.parse(py_path.read_text(encoding="utf-8"), filename=str(py_path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert alias.name.split(".")[0] not in banned, f"Banned import '{alias.name}' in {py_path.name}"
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                assert node.module.split(".")[0] not in banned, f"Banned import-from '{node.module}' in {py_path.name}"
+
+    from services.partfield.pf_core.clustering import cluster_part_features
+
+    # Clustering unitario sobre cubo simple + adyacencia MST
+    import trimesh
+    box = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
+    feats = np.zeros((len(box.faces), 16), dtype=np.float32)
+    feats[box.triangles_center[:, 2] > 0, :8] = 1.0
+    feats[box.triangles_center[:, 2] <= 0, 8:] = 1.0
+    part_ids = cluster_part_features(feats, box.vertices, box.faces, num_parts=2)
+    assert len(part_ids) == len(box.faces)
+    assert len(np.unique(part_ids)) == 2
+
+    # Contrato FastAPI + Gateway /v1/segment-parts
+    monkeypatch.delenv("STUDIO_API_TOKEN", raising=False)
+    monkeypatch.setattr(partfield_app_mod.engine, "status", lambda: {"ok": True, "service": "partfield", "distilled_core": True})
+    monkeypatch.setattr(
+        partfield_app_mod.engine,
+        "segment_glb",
+        lambda **kw: {
+            "ok": True,
+            "engine": "partfield-distilled",
+            "elapsed_s": 0.12,
+            "vertices": 8,
+            "faces": 12,
+            "part_count": 2,
+            "face_labels": [0] * 6 + [1] * 6,
+            "centers_norm": [[0.0, 0.0, 0.0]] * 12,
+        },
+    )
+    pf_client = TestClient(partfield_app_mod.app)
+    res_pf = pf_client.post(
+        "/v1/segment-parts",
+        data={"num_parts": "4"},
+        files={"mesh": ("toy.glb", b"glTF\x02\x00\x00\x00", "model/gltf-binary")},
+    )
+    assert res_pf.status_code == 200
+    assert res_pf.json()["part_count"] == 2
+
+    # Probar routing /v1/segment-parts a través del Gateway ASGI
+    pf_transport = httpx.ASGITransport(app=partfield_app_mod.app)
+    orig_ac = httpx.AsyncClient
+
+    class _GwPfClient:
+        def __init__(self, *a, **k):
+            self._c = orig_ac(transport=pf_transport, base_url="http://partfield")
+
+        async def __aenter__(self):
+            return await self._c.__aenter__()
+
+        async def __aexit__(self, *e):
+            return await self._c.__aexit__(*e)
+
+        async def post(self, url, **k):
+            return await self._c.post(url.replace(gw_mod.PARTFIELD_URL, ""), **k)
+
+    monkeypatch.setattr(gw_mod.httpx, "AsyncClient", _GwPfClient)
+    gw_c = TestClient(gw_mod.app)
+    res_gw = gw_c.post("/v1/segment-parts", data={"num_parts": "4"}, files={"mesh": ("toy.glb", b"glTF\x02", "model/gltf-binary")})
+    assert res_gw.status_code == 200
+    assert res_gw.json()["engine"] == "partfield-distilled"
+
+    # Si torch está instalado en entorno, probar forward sintético de PartFieldInferenceModel sin torch_scatter
+    try:
+        import torch
+        from services.partfield.engine import PartFieldInferenceModel
+
+        m = PartFieldInferenceModel(device="cpu")
+        out = m.extract_face_features(np.asarray(box.vertices, dtype=np.float32), np.asarray(box.faces, dtype=np.int64), pc_samples=64, points_per_face=2, sample_batch_pts=24)
+        assert out.shape == (len(box.faces), 448)
+    except ImportError:
+        pass
