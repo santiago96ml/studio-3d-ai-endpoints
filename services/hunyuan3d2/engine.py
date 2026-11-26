@@ -13,6 +13,8 @@ from typing import Any
 
 from PIL import Image
 
+from common.runtime import query_nvidia_smi
+
 
 @dataclass
 class Hunyuan3DConfig:
@@ -24,30 +26,6 @@ class Hunyuan3DConfig:
     default_octree_res: int = int(os.environ.get("HUNYUAN3D_OCTREE_RES", "384"))
     default_max_faces: int = int(os.environ.get("HUNYUAN3D_MAX_FACES", "150000"))
     device: str = os.environ.get("HUNYUAN3D_DEVICE", "cuda")
-
-
-def query_nvidia_smi() -> dict[str, Any]:
-    try:
-        out = subprocess.check_output(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,memory.used,memory.total,utilization.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-            text=True,
-            timeout=5,
-        ).strip()
-        if not out:
-            return {}
-        name, used, total, util = [x.strip() for x in out.splitlines()[0].split(",")]
-        return {
-            "gpu_name": name,
-            "vram_used_mb": int(float(used)),
-            "vram_total_mb": int(float(total)),
-            "gpu_util_pct": int(float(util)),
-        }
-    except Exception:
-        return {}
 
 
 class Hunyuan3DEngine:

@@ -5,9 +5,34 @@ from __future__ import annotations
 import os
 import subprocess
 import time
-from typing import Mapping
+from typing import Any, Mapping
 
 from fastapi import HTTPException
+
+
+def query_nvidia_smi() -> dict[str, Any]:
+    """Query nvidia-smi for GPU name, memory used/total (MB), and utilization (%)."""
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.used,memory.total,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            timeout=5,
+        ).strip()
+        if not out:
+            return {}
+        name, used, total, util = [x.strip() for x in out.splitlines()[0].split(",")]
+        return {
+            "gpu_name": name,
+            "vram_used_mb": int(float(used)),
+            "vram_total_mb": int(float(total)),
+            "gpu_util_pct": int(float(util)),
+        }
+    except Exception:
+        return {}
 
 
 def detect_gpu_info() -> dict:

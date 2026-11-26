@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import trimesh
 
-from services.hunyuan3d2.engine import query_nvidia_smi
+from common.runtime import query_nvidia_smi
 
 
 @dataclass
