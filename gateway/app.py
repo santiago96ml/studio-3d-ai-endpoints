@@ -25,6 +25,8 @@ gpu_lease_lock = asyncio.Lock()
 
 FLUX2_URL = os.environ.get("FLUX2_URL", "http://127.0.0.1:8001").rstrip("/")
 TRELLIS2_URL = os.environ.get("TRELLIS2_URL", "http://127.0.0.1:8002").rstrip("/")
+HUNYUAN3D_URL = os.environ.get("HUNYUAN3D_URL", "http://127.0.0.1:8003").rstrip("/")
+DEFAULT_3D_ENGINE = os.environ.get("STUDIO_3D_ENGINE", "auto").strip().lower()
 
 
 def _forward_headers() -> dict[str, str]:
@@ -45,19 +47,52 @@ async def _probe_service(client: httpx.AsyncClient, url: str) -> dict:
 @app.get("/health")
 async def health():
     async with httpx.AsyncClient() as client:
-        flux_h, trellis_h = await asyncio.gather(
+        flux_h, trellis_h, hunyuan_h = await asyncio.gather(
             _probe_service(client, FLUX2_URL),
             _probe_service(client, TRELLIS2_URL),
+            _probe_service(client, HUNYUAN3D_URL),
         )
     return {
-        "ok": bool(flux_h.get("ok") or trellis_h.get("ok")),
+        "ok": bool(flux_h.get("ok") or trellis_h.get("ok") or hunyuan_h.get("ok")),
         "service": "studio-3d-gateway",
+        "default_3d_engine": DEFAULT_3D_ENGINE,
         "gpu": detect_gpu_info(),
         "services": {
             "flux2_klein": flux_h,
+            "hunyuan3d2": hunyuan_h,
             "trellis2": trellis_h,
         },
     }
+
+
+async def _select_3d_backend(client: httpx.AsyncClient, requested: str) -> tuple[str, str]:
+    req = (requested or DEFAULT_3D_ENGINE or "auto").strip().lower()
+    if req in ("hunyuan", "hunyuan3d", "hunyuan3d2", "hy3d"):
+        return "hunyuan3d2", HUNYUAN3D_URL
+    if req in ("trellis", "trellis2"):
+        return "trellis2", TRELLIS2_URL
+    if DEFAULT_3D_ENGINE in ("hunyuan", "hunyuan3d", "hunyuan3d2", "hy3d"):
+        return "hunyuan3d2", HUNYUAN3D_URL
+    if DEFAULT_3D_ENGINE in ("trellis", "trellis2"):
+        return "trellis2", TRELLIS2_URL
+    # Auto: prefer distilled Hunyuan3D-2 if healthy, otherwise TRELLIS.2
+    hy_h, tr_h = await asyncio.gather(
+        _probe_service(client, HUNYUAN3D_URL),
+        _probe_service(client, TRELLIS2_URL),
+    )
+    if hy_h.get("ok"):
+        return "hunyuan3d2", HUNYUAN3D_URL
+    if tr_h.get("ok"):
+        return "trellis2", TRELLIS2_URL
+    return "hunyuan3d2", HUNYUAN3D_URL
+
+
+async def _maybe_unload_other_3d(client: httpx.AsyncClient, target_engine: str) -> None:
+    if target_engine == "trellis2":
+        try:
+            await client.post(f"{HUNYUAN3D_URL}/v1/unload", headers=_forward_headers(), timeout=5.0)
+        except Exception:
+            pass
 
 
 @app.post("/v1/concept")
@@ -122,13 +157,17 @@ async def image_to_3d_endpoint(
     image: UploadFile = File(...),
     extra_views: Optional[List[UploadFile]] = File(None),
     view_angles: str = Form("0,90,180,270"),
-    res: int = Form(512),
-    steps: int = Form(12),
+    res: Optional[int] = Form(None),
+    steps: Optional[int] = Form(None),
+    guidance: float = Form(5.0),
     faces: int = Form(150000),
     seed: int = Form(42),
     no_texture: bool = Form(True),
     bg_removal: str = Form("auto"),
     strict: bool = Form(False),
+    watertight: bool = Form(True),
+    engine: str = Form("auto"),
+    variant: Optional[str] = Form(None),
     response_format: str = Form("glb"),
 ):
     verify_api_token(request.headers)
@@ -145,34 +184,54 @@ async def image_to_3d_endpoint(
             if raw:
                 files.append(("extra_views", (item.filename or f"view_{idx}.png", raw, item.content_type or "image/png")))
 
-    data = {
-        "view_angles": view_angles,
-        "res": str(res),
-        "steps": str(steps),
-        "faces": str(faces),
-        "seed": str(seed),
-        "no_texture": "true" if no_texture else "false",
-        "bg_removal": bg_removal,
-        "strict": "true" if strict else "false",
-        "response_format": response_format,
-    }
-
     async with gpu_lease_lock:
         async with httpx.AsyncClient(timeout=480.0) as client:
+            chosen_engine, backend_url = await _select_3d_backend(client, engine)
+            await _maybe_unload_other_3d(client, chosen_engine)
+
+            if chosen_engine == "hunyuan3d2":
+                data = {
+                    "res": str(res if res is not None else 384),
+                    "steps": str(steps if steps is not None else 5),
+                    "guidance": str(guidance),
+                    "faces": str(faces),
+                    "seed": str(seed),
+                    "bg_removal": bg_removal,
+                    "watertight": "true" if watertight else "false",
+                    "response_format": "b64" if response_format.strip().lower() == "json" else response_format,
+                }
+                if variant:
+                    data["variant"] = variant
+                send_files = [files[0]]
+            else:
+                data = {
+                    "view_angles": view_angles,
+                    "res": str(res if res is not None else 512),
+                    "steps": str(steps if steps is not None else 12),
+                    "faces": str(faces),
+                    "seed": str(seed),
+                    "no_texture": "true" if no_texture else "false",
+                    "bg_removal": bg_removal,
+                    "strict": "true" if strict else "false",
+                    "response_format": response_format,
+                }
+                send_files = files
+
             resp = await client.post(
-                f"{TRELLIS2_URL}/v1/image-to-3d",
+                f"{backend_url}/v1/image-to-3d",
                 data=data,
-                files=files,
+                files=send_files,
                 headers=_forward_headers(),
             )
     if resp.status_code >= 400:
         raise HTTPException(status_code=resp.status_code, detail=resp.text[:500])
 
-    if response_format.strip().lower() == "json":
+    if response_format.strip().lower() in ("json", "b64"):
         return resp.json()
     pass_headers = {
         k: v for k, v in resp.headers.items() if k.lower().startswith("x-") or k.lower() == "content-disposition"
     }
+    pass_headers.setdefault("X-Engine", chosen_engine)
     return Response(content=resp.content, media_type="model/gltf-binary", headers=pass_headers)
 
 
@@ -184,14 +243,15 @@ async def sketch_to_3d_endpoint(
     width: int = Form(768),
     height: int = Form(768),
     flux_steps: int = Form(4),
-    trellis_res: int = Form(512),
-    trellis_steps: int = Form(12),
+    trellis_res: Optional[int] = Form(None),
+    trellis_steps: Optional[int] = Form(None),
     faces: int = Form(150000),
     seed: int = Form(42),
     no_texture: bool = Form(True),
+    engine: str = Form("auto"),
     response_format: str = Form("json"),
 ):
-    """End-to-end GPU-serialized pipeline: sketch -> FLUX.2 concept -> TRELLIS.2 GLB."""
+    """End-to-end GPU-serialized pipeline: sketch -> FLUX.2 concept -> 3D engine GLB."""
     verify_api_token(request.headers)
     raw_sketch = await image.read()
     if not raw_sketch:
@@ -200,6 +260,7 @@ async def sketch_to_3d_endpoint(
     t0 = time.perf_counter()
     async with gpu_lease_lock:
         async with httpx.AsyncClient(timeout=600.0) as client:
+            chosen_engine, backend_url = await _select_3d_backend(client, engine)
             t_f0 = time.perf_counter()
             r_flux = await client.post(
                 f"{FLUX2_URL}/v1/concept",
@@ -220,25 +281,39 @@ async def sketch_to_3d_endpoint(
             concept_bytes = r_flux.content
             flux_sec = round(time.perf_counter() - t_f0, 3)
 
+            await _maybe_unload_other_3d(client, chosen_engine)
             t_t0 = time.perf_counter()
-            r_3d = await client.post(
-                f"{TRELLIS2_URL}/v1/image-to-3d",
-                data={
-                    "res": str(trellis_res),
-                    "steps": str(trellis_steps),
+            if chosen_engine == "hunyuan3d2":
+                recon_data = {
+                    "res": str(trellis_res if trellis_res is not None else 384),
+                    "steps": str(trellis_steps if trellis_steps is not None else 5),
+                    "faces": str(faces),
+                    "seed": str(seed),
+                    "bg_removal": "auto",
+                    "watertight": "true",
+                    "response_format": "glb",
+                }
+            else:
+                recon_data = {
+                    "res": str(trellis_res if trellis_res is not None else 512),
+                    "steps": str(trellis_steps if trellis_steps is not None else 12),
                     "faces": str(faces),
                     "seed": str(seed),
                     "no_texture": "true" if no_texture else "false",
                     "bg_removal": "auto",
                     "response_format": "glb",
-                },
+                }
+
+            r_3d = await client.post(
+                f"{backend_url}/v1/image-to-3d",
+                data=recon_data,
                 files=[("image", ("concept.png", concept_bytes, "image/png"))],
                 headers=_forward_headers(),
             )
             if r_3d.status_code >= 400:
-                raise HTTPException(status_code=r_3d.status_code, detail=f"TRELLIS.2 failed: {r_3d.text[:400]}")
+                raise HTTPException(status_code=r_3d.status_code, detail=f"{chosen_engine} failed: {r_3d.text[:400]}")
             glb_bytes = r_3d.content
-            trellis_sec = round(time.perf_counter() - t_t0, 3)
+            recon_sec = round(time.perf_counter() - t_t0, 3)
 
     total_sec = round(time.perf_counter() - t0, 3)
     if response_format.strip().lower() == "glb":
@@ -247,6 +322,7 @@ async def sketch_to_3d_endpoint(
             media_type="model/gltf-binary",
             headers={
                 "X-Inference-Seconds": str(total_sec),
+                "X-Engine": chosen_engine,
                 "Content-Disposition": 'attachment; filename="sketch_to_3d.glb"',
             },
         )
@@ -254,11 +330,13 @@ async def sketch_to_3d_endpoint(
     return {
         "ok": True,
         "service": "studio-3d-gateway",
+        "engine_used": chosen_engine,
         "concept_png_b64": base64.b64encode(concept_bytes).decode("ascii"),
         "glb_b64": base64.b64encode(glb_bytes).decode("ascii"),
         "timings": {
             "flux2_sec": flux_sec,
-            "trellis2_sec": trellis_sec,
+            "recon_sec": recon_sec,
+            "trellis2_sec": recon_sec,
             "total_sec": total_sec,
         },
     }

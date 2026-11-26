@@ -97,12 +97,17 @@ def _spawn_uvicorn(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Start isolated per-model GPU endpoints")
-    parser.add_argument("--mode", choices=["all", "flux2", "trellis2"], default="all")
+    parser.add_argument(
+        "--mode",
+        choices=["all", "flux2", "trellis2", "hunyuan3d2", "flux2_hunyuan3d2", "flux2_trellis2"],
+        default="flux2_hunyuan3d2",
+    )
     parser.add_argument("--env-root", default=os.environ.get("ENV_ROOT", "/content/envs"))
     parser.add_argument("--runtime-root", default=os.environ.get("RUNTIME_ROOT", "/content/runtime"))
     parser.add_argument("--gateway-port", type=int, default=8000)
     parser.add_argument("--flux2-port", type=int, default=8001)
     parser.add_argument("--trellis2-port", type=int, default=8002)
+    parser.add_argument("--hunyuan3d2-port", type=int, default=8003)
     parser.add_argument("--no-tunnel", action="store_true")
     args = parser.parse_args()
 
@@ -130,8 +135,13 @@ def main() -> int:
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
+    use_flux2 = args.mode in ("all", "flux2", "flux2_hunyuan3d2", "flux2_trellis2")
+    use_hunyuan = args.mode in ("all", "hunyuan3d2", "flux2_hunyuan3d2")
+    use_trellis = args.mode in ("all", "trellis2", "flux2_trellis2")
+    use_gateway = args.mode in ("all", "flux2_hunyuan3d2", "flux2_trellis2")
+
     try:
-        if args.mode in ("all", "flux2"):
+        if use_flux2:
             f_env = _load_env_file(runtime_root / "flux2.env")
             f_py = _venv_python(env_root, "flux2")
             print(f"[start] Launching FLUX.2-klein-4B service on :{args.flux2_port} ({f_py})...", flush=True)
@@ -139,7 +149,15 @@ def main() -> int:
             if not _wait_http_ok(f"http://127.0.0.1:{args.flux2_port}/health"):
                 print("[warn] FLUX.2 health check did not respond within 45s; inspect", runtime_root / "flux2.log", flush=True)
 
-        if args.mode in ("all", "trellis2"):
+        if use_hunyuan:
+            h_env = _load_env_file(runtime_root / "hunyuan3d2.env")
+            h_py = _venv_python(env_root, "hunyuan3d2")
+            print(f"[start] Launching Distilled Hunyuan3D-2 service on :{args.hunyuan3d2_port} ({h_py})...", flush=True)
+            procs.append(_spawn_uvicorn(h_py, "services.hunyuan3d2.app:app", args.hunyuan3d2_port, h_env, runtime_root / "hunyuan3d2.log", open_logs))
+            if not _wait_http_ok(f"http://127.0.0.1:{args.hunyuan3d2_port}/health"):
+                print("[warn] Hunyuan3D-2 health check did not respond within 45s; inspect", runtime_root / "hunyuan3d2.log", flush=True)
+
+        if use_trellis:
             t_env = _load_env_file(runtime_root / "trellis2.env")
             t_py = _venv_python(env_root, "trellis2")
             print(f"[start] Launching TRELLIS.2-4B service on :{args.trellis2_port} ({t_py})...", flush=True)
@@ -147,17 +165,26 @@ def main() -> int:
             if not _wait_http_ok(f"http://127.0.0.1:{args.trellis2_port}/health"):
                 print("[warn] TRELLIS.2 health check did not respond within 45s; inspect", runtime_root / "trellis2.log", flush=True)
 
-        expose_port = args.flux2_port if args.mode == "flux2" else (args.trellis2_port if args.mode == "trellis2" else args.gateway_port)
-        if args.mode == "all":
+        if use_gateway:
+            expose_port = args.gateway_port
+            default_3d = "trellis2" if args.mode == "flux2_trellis2" else "hunyuan3d2"
             g_py = _venv_python(env_root, "gateway")
             g_env = {
                 "FLUX2_URL": f"http://127.0.0.1:{args.flux2_port}",
                 "TRELLIS2_URL": f"http://127.0.0.1:{args.trellis2_port}",
+                "HUNYUAN3D_URL": f"http://127.0.0.1:{args.hunyuan3d2_port}",
+                "STUDIO_3D_ENGINE": default_3d,
             }
-            print(f"[start] Launching GPU-Lease Gateway on :{args.gateway_port} ({g_py})...", flush=True)
+            print(f"[start] Launching GPU-Lease Gateway on :{args.gateway_port} ({g_py}, default_3d={default_3d})...", flush=True)
             procs.append(_spawn_uvicorn(g_py, "gateway.app:app", args.gateway_port, g_env, runtime_root / "gateway.log", open_logs))
             if not _wait_http_ok(f"http://127.0.0.1:{args.gateway_port}/health"):
                 print("[warn] Gateway health check did not respond; inspect", runtime_root / "gateway.log", flush=True)
+        elif use_flux2:
+            expose_port = args.flux2_port
+        elif use_hunyuan:
+            expose_port = args.hunyuan3d2_port
+        else:
+            expose_port = args.trellis2_port
 
         if args.no_tunnel:
             print(f"[ready] Running locally on http://127.0.0.1:{expose_port} (--no-tunnel)", flush=True)
@@ -189,11 +216,11 @@ def main() -> int:
                 print("\n" + "=" * 68, flush=True)
                 print(f" PUBLIC URL (pegar en Robótica 3D Studio /admin): {public_url}", flush=True)
                 print(f"  - GET  {public_url}/health", flush=True)
-                if args.mode in ("all", "flux2"):
+                if use_flux2:
                     print(f"  - POST {public_url}/v1/concept", flush=True)
-                if args.mode in ("all", "trellis2"):
+                if use_hunyuan or use_trellis:
                     print(f"  - POST {public_url}/v1/image-to-3d", flush=True)
-                if args.mode == "all":
+                if use_gateway:
                     print(f"  - POST {public_url}/v1/sketch-to-3d", flush=True)
                 print("=" * 68 + "\n", flush=True)
     finally:
