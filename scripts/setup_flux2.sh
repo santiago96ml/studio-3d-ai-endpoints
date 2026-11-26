@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PATH="/usr/local/cuda/bin:${PATH}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -19,7 +20,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 if [ ! -x "${FLUX2_VENV}/bin/python" ]; then
-  uv venv "${FLUX2_VENV}" --python 3.11 --seed || uv venv "${FLUX2_VENV}" --python 3.10 --seed
+  uv venv "${FLUX2_VENV}" --python 3.11 --seed || uv venv "${FLUX2_VENV}" --python 3.10 --seed || uv venv "${FLUX2_VENV}" --seed
 fi
 
 uv pip install --python "${FLUX2_VENV}/bin/python" -r "${REPO_ROOT}/services/flux2_klein/requirements.txt"
@@ -51,6 +52,7 @@ if [ ! -x "${SDCPP_BIN}" ]; then
     -DCMAKE_CUDA_ARCHITECTURES="${GPU_ARCH}" \
     -DCMAKE_BUILD_TYPE=Release
   cmake --build "${SDCPP_DIR}/build" --target sd-cli -j"$(nproc)"
+  find "${SDCPP_DIR}/build" -maxdepth 5 -name "*.so*" -exec cp -Pf {} "${SDCPP_DIR}/build/bin/" \; 2>/dev/null || true
 fi
 
 MODEL_FILE="flux-2-klein-4b-${FLUX2_QUANT}.gguf"

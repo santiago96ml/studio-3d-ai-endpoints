@@ -14,7 +14,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 if [ ! -x "${GATEWAY_VENV}/bin/python" ]; then
-  uv venv "${GATEWAY_VENV}" --python 3.11 --seed || uv venv "${GATEWAY_VENV}" --python 3.10 --seed
+  uv venv "${GATEWAY_VENV}" --python 3.11 --seed || uv venv "${GATEWAY_VENV}" --python 3.10 --seed || uv venv "${GATEWAY_VENV}" --seed
 fi
 
 uv pip install --python "${GATEWAY_VENV}/bin/python" -r "${REPO_ROOT}/gateway/requirements.txt"

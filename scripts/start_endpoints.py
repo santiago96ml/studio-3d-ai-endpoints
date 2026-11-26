@@ -134,18 +134,18 @@ def main() -> int:
         if args.mode in ("all", "flux2"):
             f_env = _load_env_file(runtime_root / "flux2.env")
             f_py = _venv_python(env_root, "flux2")
-            print(f"[start] Launching FLUX.2-klein-4B service on :{args.flux2_port} ({f_py})...")
+            print(f"[start] Launching FLUX.2-klein-4B service on :{args.flux2_port} ({f_py})...", flush=True)
             procs.append(_spawn_uvicorn(f_py, "services.flux2_klein.app:app", args.flux2_port, f_env, runtime_root / "flux2.log", open_logs))
             if not _wait_http_ok(f"http://127.0.0.1:{args.flux2_port}/health"):
-                print("[warn] FLUX.2 health check did not respond within 45s; inspect", runtime_root / "flux2.log")
+                print("[warn] FLUX.2 health check did not respond within 45s; inspect", runtime_root / "flux2.log", flush=True)
 
         if args.mode in ("all", "trellis2"):
             t_env = _load_env_file(runtime_root / "trellis2.env")
             t_py = _venv_python(env_root, "trellis2")
-            print(f"[start] Launching TRELLIS.2-4B service on :{args.trellis2_port} ({t_py})...")
+            print(f"[start] Launching TRELLIS.2-4B service on :{args.trellis2_port} ({t_py})...", flush=True)
             procs.append(_spawn_uvicorn(t_py, "services.trellis2.app:app", args.trellis2_port, t_env, runtime_root / "trellis2.log", open_logs))
             if not _wait_http_ok(f"http://127.0.0.1:{args.trellis2_port}/health"):
-                print("[warn] TRELLIS.2 health check did not respond within 45s; inspect", runtime_root / "trellis2.log")
+                print("[warn] TRELLIS.2 health check did not respond within 45s; inspect", runtime_root / "trellis2.log", flush=True)
 
         expose_port = args.flux2_port if args.mode == "flux2" else (args.trellis2_port if args.mode == "trellis2" else args.gateway_port)
         if args.mode == "all":
@@ -154,19 +154,19 @@ def main() -> int:
                 "FLUX2_URL": f"http://127.0.0.1:{args.flux2_port}",
                 "TRELLIS2_URL": f"http://127.0.0.1:{args.trellis2_port}",
             }
-            print(f"[start] Launching GPU-Lease Gateway on :{args.gateway_port} ({g_py})...")
+            print(f"[start] Launching GPU-Lease Gateway on :{args.gateway_port} ({g_py})...", flush=True)
             procs.append(_spawn_uvicorn(g_py, "gateway.app:app", args.gateway_port, g_env, runtime_root / "gateway.log", open_logs))
             if not _wait_http_ok(f"http://127.0.0.1:{args.gateway_port}/health"):
-                print("[warn] Gateway health check did not respond; inspect", runtime_root / "gateway.log")
+                print("[warn] Gateway health check did not respond; inspect", runtime_root / "gateway.log", flush=True)
 
         if args.no_tunnel:
-            print(f"[ready] Running locally on http://127.0.0.1:{expose_port} (--no-tunnel)")
+            print(f"[ready] Running locally on http://127.0.0.1:{expose_port} (--no-tunnel)", flush=True)
             while all(p.poll() is None for p in procs):
                 time.sleep(1.0)
             return 0
 
         cf_bin = _find_cloudflared(runtime_root)
-        print(f"[tunnel] Starting Cloudflare Quick Tunnel -> http://127.0.0.1:{expose_port} ...")
+        print(f"[tunnel] Starting Cloudflare Quick Tunnel -> http://127.0.0.1:{expose_port} ...", flush=True)
         cf_proc = subprocess.Popen(
             [cf_bin, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{expose_port}"],
             stdout=subprocess.PIPE,
@@ -180,19 +180,21 @@ def main() -> int:
         public_url = None
         assert cf_proc.stdout is not None
         for line in cf_proc.stdout:
-            sys.stdout.flush()
+            if not public_url and ("ERR" in line or "failed" in line.lower()):
+                print(f"[tunnel] {line.rstrip()}", flush=True)
             m = TRYCF_RE.search(line)
             if m and not public_url:
                 public_url = m.group(0)
-                print("\n" + "=" * 68)
-                print(f" PUBLIC URL (pegar en Robótica 3D Studio /admin): {public_url}")
-                print(f"  - GET  {public_url}/health")
+                (runtime_root / "public_url.txt").write_text(public_url + "\n", encoding="utf-8")
+                print("\n" + "=" * 68, flush=True)
+                print(f" PUBLIC URL (pegar en Robótica 3D Studio /admin): {public_url}", flush=True)
+                print(f"  - GET  {public_url}/health", flush=True)
                 if args.mode in ("all", "flux2"):
-                    print(f"  - POST {public_url}/v1/concept")
+                    print(f"  - POST {public_url}/v1/concept", flush=True)
                 if args.mode in ("all", "trellis2"):
-                    print(f"  - POST {public_url}/v1/image-to-3d")
+                    print(f"  - POST {public_url}/v1/image-to-3d", flush=True)
                 if args.mode == "all":
-                    print(f"  - POST {public_url}/v1/sketch-to-3d")
+                    print(f"  - POST {public_url}/v1/sketch-to-3d", flush=True)
                 print("=" * 68 + "\n", flush=True)
     finally:
         cleanup()

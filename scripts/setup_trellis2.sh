@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PATH="/usr/local/cuda/bin:${PATH}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -20,7 +21,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 if [ ! -x "${TRELLIS_VENV}/bin/python" ]; then
-  uv venv "${TRELLIS_VENV}" --python 3.11 --seed || uv venv "${TRELLIS_VENV}" --python 3.10 --seed
+  uv venv "${TRELLIS_VENV}" --python 3.11 --seed || uv venv "${TRELLIS_VENV}" --python 3.10 --seed || uv venv "${TRELLIS_VENV}" --seed
 fi
 
 uv pip install --python "${TRELLIS_VENV}/bin/python" -r "${REPO_ROOT}/services/trellis2/requirements.txt"
@@ -61,7 +62,20 @@ if [ ! -x "${TRELLIS_BIN}" ]; then
     curl -fsSL "https://github.com/pwilkin/trellis.cpp/releases/download/v0.8.1/trellis-cuda-linux-x64.tar.gz" -o "${RUNTIME_ROOT}/trellis.tar.gz"
     tar -xzf "${RUNTIME_ROOT}/trellis.tar.gz" -C "${TRELLIS_BIN_DIR}"
     rm -f "${RUNTIME_ROOT}/trellis.tar.gz"
+    if [ ! -e "${TRELLIS_BIN}" ]; then
+      FOUND_BIN="$(find "${TRELLIS_BIN_DIR}" -maxdepth 3 -name "trellis-cli" -type f | head -n1 || true)"
+      if [ -n "${FOUND_BIN}" ]; then
+        FOUND_DIR="$(dirname "${FOUND_BIN}")"
+        if [ "${FOUND_DIR}" != "${TRELLIS_BIN_DIR}" ]; then
+          cp -a "${FOUND_DIR}/." "${TRELLIS_BIN_DIR}/"
+        fi
+      fi
+    fi
     chmod +x "${TRELLIS_BIN}" 2>/dev/null || true
+    if [ -x "${TRELLIS_BIN}" ] && ! LD_LIBRARY_PATH="${TRELLIS_BIN_DIR}:${LD_LIBRARY_PATH:-}" "${TRELLIS_BIN}" --help >/dev/null 2>&1; then
+      echo "[trellis2] Prebuilt binary failed smoke test (CUDA/glibc mismatch); falling back to source build..."
+      rm -f "${TRELLIS_BIN}"
+    fi
   fi
 fi
 
@@ -77,7 +91,7 @@ if [ ! -x "${TRELLIS_BIN}" ]; then
     -DTRELLIS_WEBP=OFF
   cmake --build "${TRELLIS_SRC_DIR}/build" --target trellis-cli -j"$(nproc)"
   cp -f "${TRELLIS_SRC_DIR}/build/trellis-cli" "${TRELLIS_BIN}"
-  find "${TRELLIS_SRC_DIR}/build" -maxdepth 3 -name "*.so*" -exec cp -Pf {} "${TRELLIS_BIN_DIR}/" \; 2>/dev/null || true
+  find "${TRELLIS_SRC_DIR}/build" -maxdepth 5 -name "*.so*" -exec cp -Pf {} "${TRELLIS_BIN_DIR}/" \; 2>/dev/null || true
   chmod +x "${TRELLIS_BIN}"
 fi
 
